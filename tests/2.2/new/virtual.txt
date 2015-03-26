@@ -1,0 +1,53 @@
+HTTP/1.1 200 OK
+Date: Thu, 26 Mar 2015 22:54:25 GMT
+Server: Apache/2.2.22 (Ubuntu)
+X-Powered-By: PHP/5.3.10-1ubuntu3.16
+Vary: Accept-Encoding
+Connection: close
+Content-Type: text/html
+
+This is virtual top. Starting 2.
+Virtual 2
+Starting sub 2a
+Virtual 2a
+Server vars
+Array
+(
+    [HTTP_USER_AGENT] => curl/7.22.0 (x86_64-pc-linux-gnu) libcurl/7.22.0 OpenSSL/1.0.1 zlib/1.2.3.4 libidn/1.23 librtmp/2.3
+    [HTTP_HOST] => localhost
+    [HTTP_ACCEPT] => */*
+    [PATH] => /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    [SERVER_SIGNATURE] => <address>Apache/2.2.22 (Ubuntu) Server at localhost Port 80</address>
+
+    [SERVER_SOFTWARE] => Apache/2.2.22 (Ubuntu)
+    [SERVER_NAME] => localhost
+    [SERVER_ADDR] => 127.0.0.1
+    [SERVER_PORT] => 80
+    [REMOTE_ADDR] => 127.0.0.1
+    [DOCUMENT_ROOT] => /var/www
+    [SERVER_ADMIN] => webmaster@localhost
+    [SCRIPT_FILENAME] => /var/www/virtual2a.php
+    [REMOTE_PORT] => 39916
+    [GATEWAY_INTERFACE] => CGI/1.1
+    [SERVER_PROTOCOL] => INCLUDED
+    [REQUEST_METHOD] => GET
+    [QUERY_STRING] => 
+    [REQUEST_URI] => /virtual.php?id=3
+    [SCRIPT_NAME] => /virtual2a.php
+    [PHP_SELF] => /virtual2a.php
+    [REQUEST_TIME] => 1427410465681
+)
+
+Ended sub2a
+Embedding html
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head></head>
+  <body>
+  </body>
+</html>
+
+Done embedding html
+Behind virtual 2.
+Starting virtual 3.
+Ended  virtual 3.

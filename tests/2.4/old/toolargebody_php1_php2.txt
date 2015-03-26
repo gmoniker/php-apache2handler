@@ -1,0 +1,93 @@
+HTTP/1.1 413 Request Entity Too Large
+Date: Thu, 26 Mar 2015 21:53:43 GMT
+Server: Apache/2.4.7 (Ubuntu)
+Connection: close
+
+ERRORDOC 413
+REQUEST HEADERS:
+Array
+(
+    [User-Agent] => curl/7.35.0
+    [Host] => localhost
+    [Accept] => */*
+    [Content-Length] => 1048777
+    [Expect] => 100-continue
+    [Content-Type] => multipart/form-data; boundary=------------------------d9f411d309d95283
+)
+RESPONSE HEADERS:
+Array
+(
+)
+FILES GLOBAL:
+SERVER GLOBAL:
+POST GLOBAL:
+GET GLOBAL:
+Array
+(
+    [id] => 1
+)
+SUMMARY
+REQUEST HEADERS:
+Array
+(
+    [User-Agent] => curl/7.35.0
+    [Host] => localhost
+    [Accept] => */*
+    [Content-Length] => 1048777
+    [Expect] => 100-continue
+    [Content-Type] => multipart/form-data; boundary=------------------------d9f411d309d95283
+)
+RESPONSE HEADERS:
+Array
+(
+    [X-Powered-By] => PHP/5.5.9-1ubuntu4.6
+    [Content-Length] => 0
+)
+FILES GLOBAL:
+Array
+(
+)
+SERVER GLOBAL:
+Array
+(
+    [HTTP_USER_AGENT] => curl/7.35.0
+    [HTTP_HOST] => localhost
+    [HTTP_ACCEPT] => */*
+    [CONTENT_LENGTH] => 1048777
+    [HTTP_EXPECT] => 100-continue
+    [CONTENT_TYPE] => multipart/form-data; boundary=------------------------d9f411d309d95283
+    [PATH] => /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    [SERVER_SIGNATURE] => <address>Apache/2.4.7 (Ubuntu) Server at localhost Port 80</address>
+
+    [SERVER_SOFTWARE] => Apache/2.4.7 (Ubuntu)
+    [SERVER_NAME] => localhost
+    [SERVER_ADDR] => 127.0.0.1
+    [SERVER_PORT] => 80
+    [REMOTE_ADDR] => 127.0.0.1
+    [DOCUMENT_ROOT] => /var/www/html
+    [REQUEST_SCHEME] => http
+    [CONTEXT_PREFIX] => 
+    [CONTEXT_DOCUMENT_ROOT] => /var/www/html
+    [SERVER_ADMIN] => webmaster@localhost
+    [SCRIPT_FILENAME] => /var/www/html/summary.php
+    [REMOTE_PORT] => 39869
+    [GATEWAY_INTERFACE] => CGI/1.1
+    [SERVER_PROTOCOL] => HTTP/1.1
+    [REQUEST_METHOD] => POST
+    [QUERY_STRING] => id=1
+    [REQUEST_URI] => /summary.php?id=1
+    [SCRIPT_NAME] => /summary.php
+    [PHP_SELF] => /summary.php
+    [REQUEST_TIME_FLOAT] => 1427406823.415
+    [REQUEST_TIME] => 1427406823
+)
+POST GLOBAL:
+Array
+(
+)
+GET GLOBAL:
+Array
+(
+    [id] => 1
+)
+Length of raw post:0

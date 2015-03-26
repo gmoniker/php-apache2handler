@@ -1,0 +1,70 @@
+HTTP/1.1 413 Request Entity Too Large
+Date: Thu, 26 Mar 2015 22:30:44 GMT
+Server: Apache/2.2.22 (Ubuntu)
+X-Powered-By: PHP/5.3.10-1ubuntu3.16
+Vary: Accept-Encoding
+Connection: close
+Content-Type: text/html
+
+ERRORDOC 413
+REQUEST HEADERS:
+Array
+(
+    [User-Agent] => curl/7.22.0 (x86_64-pc-linux-gnu) libcurl/7.22.0 OpenSSL/1.0.1 zlib/1.2.3.4 libidn/1.23 librtmp/2.3
+    [Host] => localhost
+    [Accept] => */*
+    [Content-Length] => 1048777
+    [Expect] => 100-continue
+    [Content-Type] => multipart/form-data; boundary=----------------------------bc200ed527bb
+)
+RESPONSE HEADERS:
+Array
+(
+    [X-Powered-By] => PHP/5.3.10-1ubuntu3.16
+)
+FILES GLOBAL:
+Array
+(
+)
+SERVER GLOBAL:
+Array
+(
+    [REDIRECT_REQUEST_METHOD] => POST
+    [REDIRECT_STATUS] => 413
+    [HTTP_USER_AGENT] => curl/7.22.0 (x86_64-pc-linux-gnu) libcurl/7.22.0 OpenSSL/1.0.1 zlib/1.2.3.4 libidn/1.23 librtmp/2.3
+    [HTTP_HOST] => localhost
+    [HTTP_ACCEPT] => */*
+    [CONTENT_LENGTH] => 1048777
+    [HTTP_EXPECT] => 100-continue
+    [CONTENT_TYPE] => multipart/form-data; boundary=----------------------------bc200ed527bb
+    [PATH] => /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    [SERVER_SIGNATURE] => <address>Apache/2.2.22 (Ubuntu) Server at localhost Port 80</address>
+
+    [SERVER_SOFTWARE] => Apache/2.2.22 (Ubuntu)
+    [SERVER_NAME] => localhost
+    [SERVER_ADDR] => 127.0.0.1
+    [SERVER_PORT] => 80
+    [REMOTE_ADDR] => 127.0.0.1
+    [DOCUMENT_ROOT] => /var/www
+    [SERVER_ADMIN] => webmaster@localhost
+    [SCRIPT_FILENAME] => /var/www/error413.php
+    [REMOTE_PORT] => 39894
+    [REDIRECT_QUERY_STRING] => id=2
+    [REDIRECT_URL] => /index.html
+    [GATEWAY_INTERFACE] => CGI/1.1
+    [SERVER_PROTOCOL] => HTTP/1.1
+    [REQUEST_METHOD] => GET
+    [QUERY_STRING] => 
+    [REQUEST_URI] => /index.html?id=2
+    [SCRIPT_NAME] => /error413.php
+    [PHP_SELF] => /error413.php
+    [REQUEST_TIME] => 1427409044
+)
+POST GLOBAL:
+Array
+(
+)
+GET GLOBAL:
+Array
+(
+)

@@ -1,0 +1,9 @@
+<html>
+<head>
+<title>Simple SSI</title>
+</head>
+<body>
+<!--#include virtual="/ssi.php?id=shtml-ssi" -->
+<!--#include virtual="/summary.php?id=shtml-sum" -->
+</body>
+</html>
