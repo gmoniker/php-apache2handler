@@ -617,7 +617,12 @@ static int php_handler(request_rec *r)
 		ap_add_cgi_vars(r);
 	}
 
-zend_first_try {
+	if (!parent_req) {
+		// Make this the first try
+		EG(bailout) = NULL;
+	}
+
+zend_try {
 
 	if (ctx == NULL) { 
 		/* We came in WITHOUT a context. The SAPI must be activated to handle PHP */
@@ -661,6 +666,20 @@ zend_first_try {
 
 } zend_end_try();
 	/* zend_bailout will land here */
+	if (CG(unclean_shutdown)) {
+		/*
+		 * There was a bailout along the way.
+		 * Only handle the exit in the main PHP script.
+		 * Otherwise we may hit PHP script along the way with a shutdown PHP engine.
+		 */
+		if (EG(bailout)) {
+			// Jump up the stack one level
+			LONGJMP(*EG(bailout), FAILURE);
+		}
+		// Back at the main script, proceed to exit.
+		r->status = HTTP_INTERNAL_SERVER_ERROR;
+		r->connection->keepalive = AP_CONN_CLOSE;
+	}
 
 	if (!parent_req) {
 		/* A PHP tree of requests with possible subrequests has been completely handled.
