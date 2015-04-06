@@ -615,24 +615,6 @@ normal:
 
 zend_try {
 
-	if (CG(unclean_shutdown)) {
-		/*
-		 * Only handle the exit in the main PHP script.
-		 * Otherwise PHP script may be hit along the way 
-		 * with a PHP engine that is partly shutdown.
-		 */
-		if (EG(bailout)) {
-			// TRQ Jump up the stack one level
-			LONGJMP(*EG(bailout), FAILURE);
-		}
-		/*
-		 * Now back at the main script, proceed to exit.
-		 * Input filters may be unreliable, drop connection.
-		 */
-		r->status = HTTP_INTERNAL_SERVER_ERROR;
-		r->connection->keepalive = AP_CONN_CLOSE;
-	}
-
 	if (ctx == NULL) {
 		brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
 		ctx = SG(server_context);
@@ -697,6 +679,24 @@ zend_try {
 	}
 
 } zend_end_try();
+
+	if (CG(unclean_shutdown)) {
+		/*
+		 * Only handle the exit in the main PHP script.
+		 * Otherwise PHP script may be hit along the way 
+		 * with a PHP engine that is partly shutdown.
+		 */
+		if (EG(bailout)) {
+			// TRQ Jump up the stack one level
+			LONGJMP(*EG(bailout), FAILURE);
+		}
+		/*
+		 * Now back at the main script, proceed to exit.
+		 * Input filters may be unreliable, drop connection.
+		 */
+		r->status = HTTP_INTERNAL_SERVER_ERROR;
+		r->connection->keepalive = AP_CONN_CLOSE;
+	}
 
 	if (!parent_req) {
 		php_apache_request_dtor(r TSRMLS_CC);
