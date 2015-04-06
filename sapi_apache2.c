@@ -623,7 +623,6 @@ zend_try {
 		 */
 		if (EG(bailout)) {
 			// TRQ Jump up the stack one level
-			ctx->nesting_level--;
 			LONGJMP(*EG(bailout), FAILURE);
 		}
 		/*
