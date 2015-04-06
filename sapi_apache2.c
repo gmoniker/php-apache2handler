@@ -461,6 +461,13 @@ php_apache_server_startup(apr_pool_t *pconf, apr_pool_t *plog, apr_pool_t *ptemp
 	return OK;
 }
 
+static apr_status_t php_server_context_cleanup(void *data_)
+{
+	void **data = data_;
+	*data = NULL;
+	return APR_SUCCESS;
+}
+
 static int php_apache_request_ctor(request_rec *r, php_struct *ctx TSRMLS_DC)
 {
 	char *content_length;
@@ -522,7 +529,7 @@ typedef struct {
 	if (p) {
 		((php_struct *)SG(server_context))->r = p;
 	} else {
-		SG(server_context) = NULL;
+		apr_pool_cleanup_run(r->pool, (void *)&SG(server_context), php_server_context_cleanup);
 	}
 }
 
@@ -542,36 +549,21 @@ static int php_handler(request_rec *r)
 
 	/* apply_config() needs r in some cases, so allocate server_context early */
 	ctx = SG(server_context);
-	if (ctx == NULL) {
-		/* The incoming request is a root PHP request.
-		 * It does not have to be the root of the client request.
-		 * The client request may have another handler at root.
-		 * In that case there can be sequential PHP subrequests creating their own root tree.
-		 * This can also be a PHP script called as ErrorDocument by the HTTP core of Apache.
-		 * In that case the original request for some 4xx statuses could be handled first.
-		 * 413 for example will still reach the first handler (us also?).
-		 */
+	if (ctx == NULL || (ctx && ctx->request_processed && !strcmp(r->protocol, "INCLUDED"))) {
+normal:
 		ctx = SG(server_context) = apr_pcalloc(r->pool, sizeof(*ctx));
-		/* Note. After handling one PHP request with possible subrequests,
-		 * SG(server_context) MUST be set to NULL and the SAPI deactivated.
-		 * Else they may be visible in a pipelined follow-on request of the client for Apache >=2.4
+		/* register a cleanup so we clear out the SG(server_context)
+		 * after each request. Note: We pass in the pointer to the
+		 * server_context in case this is handled by a different thread.
 		 */
+		apr_pool_cleanup_register(r->pool, (void *)&SG(server_context), php_server_context_cleanup, apr_pool_cleanup_null);
 		ctx->r = r;
 		ctx = NULL; /* May look weird to null it here, but it is to catch the right case in the first_try later on */
 	} else {
-		/* This is a subrequest of a PHP request tree.
-		 * The direct parent of this subrequest does not have to be a PHP request.
-		 * The pointer called parent is merely the first PHP script walking up the request tree.
-		 */
 		parent_req = ctx->r;
-		brigade = ctx->brigade;
 		ctx->r = r;
 	}
 	apply_config(conf);
-
-	/* At this point there is a context allocated but it is not sure IF we are really going to handle this call with PHP.
-	 * The following section runs through some cases where we will NOT. 
-	 * IF not, then we roll back the changes to context and config and return the reason. */
 
 	if (strcmp(r->handler, PHP_MAGIC_TYPE) && strcmp(r->handler, PHP_SOURCE_MAGIC_TYPE) && strcmp(r->handler, PHP_SCRIPT)) {
 		/* Check for xbithack in this case. */
@@ -604,8 +596,7 @@ static int php_handler(request_rec *r)
 		php_apache_sapi_log_message_ex("attempt to invoke directory '%s' as script", r TSRMLS_CC);
 		PHPAP_INI_OFF;
 		return HTTP_FORBIDDEN;
-	}	
-	/* End of section testing for cases we will NOT handle */
+	}
 
 	/* Setup the CGI variables if this is the main request */
 	if (r->main == NULL ||
@@ -617,18 +608,65 @@ static int php_handler(request_rec *r)
 		ap_add_cgi_vars(r);
 	}
 
-zend_first_try {
+	if (!parent_req) {
+		// Make this the first try, so we can bubble up later.
+		EG(bailout) = NULL;
+	}
 
-	if (ctx == NULL) { 
-		/* We came in WITHOUT a context. The SAPI must be activated to handle PHP */
+zend_try {
+
+	if (CG(unclean_shutdown)) {
+		/*
+		 * Only handle the exit in the main PHP script.
+		 * Otherwise PHP script may be hit along the way 
+		 * with a PHP engine that is partly shutdown.
+		 */
+		if (EG(bailout)) {
+			// TRQ Jump up the stack one level
+			ctx->nesting_level--;
+			LONGJMP(*EG(bailout), FAILURE);
+		}
+		/*
+		 * Now back at the main script, proceed to exit.
+		 * Input filters may be unreliable, drop connection.
+		 */
+		r->status = HTTP_INTERNAL_SERVER_ERROR;
+		r->connection->keepalive = AP_CONN_CLOSE;
+	}
+
+	if (ctx == NULL) {
 		brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
 		ctx = SG(server_context);
 		ctx->brigade = brigade;
 
 		if (php_apache_request_ctor(r, ctx TSRMLS_CC)!=SUCCESS) {
 			zend_bailout();
-			/* lands after next zend_end_try */
 		}
+	} else {
+		if (!parent_req) {
+			parent_req = ctx->r;
+		}
+		if (parent_req && parent_req->handler &&
+				strcmp(parent_req->handler, PHP_MAGIC_TYPE) &&
+				strcmp(parent_req->handler, PHP_SOURCE_MAGIC_TYPE) &&
+				strcmp(parent_req->handler, PHP_SCRIPT)) {
+			if (php_apache_request_ctor(r, ctx TSRMLS_CC)!=SUCCESS) {
+				zend_bailout();
+			}
+		}
+
+		/*
+		 * check if coming due to ErrorDocument
+		 * We make a special exception of 413 (Invalid POST request) as the invalidity of the request occurs
+		 * during processing of the request by PHP during POST processing. Therefor we need to re-use the exiting
+		 * PHP instance to handle the request rather then creating a new one.
+		*/
+		if (parent_req && parent_req->status != HTTP_OK && parent_req->status != 413 && strcmp(r->protocol, "INCLUDED")) {
+			parent_req = NULL;
+			goto normal;
+		}
+		ctx->r = r;
+		brigade = ctx->brigade;
 	}
 
 	if (AP2(last_modified)) {
@@ -660,15 +698,11 @@ zend_first_try {
 	}
 
 } zend_end_try();
-	/* zend_bailout will land here */
 
 	if (!parent_req) {
-		/* A PHP tree of requests with possible subrequests has been completely handled.
-		 * More PHP requests may come from this client request if the root handler is not PHP.
-		 * The SAPI will have to be activated again for them.
-		 */
 		php_apache_request_dtor(r TSRMLS_CC);
-		SG(server_context) = NULL;
+		ctx->request_processed = 1;
+		apr_pool_cleanup_run(r->pool, (void *)&SG(server_context), php_server_context_cleanup);
 		bucket = apr_bucket_eos_create(r->connection->bucket_alloc);
 		APR_BRIGADE_INSERT_TAIL(brigade, bucket);
 
