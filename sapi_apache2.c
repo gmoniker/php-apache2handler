@@ -183,30 +183,103 @@ php_apache_sapi_send_headers(sapi_headers_struct *sapi_headers TSRMLS_DC)
 static int
 php_apache_sapi_read_post(char *buf, uint count_bytes TSRMLS_DC)
 {
-	apr_size_t len, tlen=0;
+	/*
+	 * This routine will be called:
+	 * On PHP request_startup in php_hash_environment IF request method is POST,
+	 *  AND P is included in GPC setting.
+	 * On PHP request shutdown during sapi_deactivate PHP will always read remaining bytes.
+	 * But ALSO on any reading of php://stdin during script execution.
+	 */
+
+	apr_size_t len_asked, len_gotten;
+	int tlen, buffer_used;
+	apr_off_t len;
 	php_struct *ctx = SG(server_context);
 	request_rec *r;
 	apr_bucket_brigade *brigade;
 
 	r = ctx->r;
-	brigade = ctx->brigade;
-	len = count_bytes;
+	tlen = (int)count_bytes;
+	if (tlen < 0) {
+		// count_bytes is overflowing int
+		r->status = HTTP_INTERNAL_SERVER_ERROR;
+		return 0;
+	}
 
-	/*
-	 * This loop is needed because ap_get_brigade() can return us partial data
-	 * which would cause premature termination of request read. Therefor we
-	 * need to make sure that if data is available we fill the buffer completely.
-	 */
+	tlen = 0;
+	len_asked = (apr_size_t)count_bytes;
 
-	while (ap_get_brigade(r->input_filters, brigade, AP_MODE_READBYTES, APR_BLOCK_READ, len) == APR_SUCCESS) {
-		apr_brigade_flatten(brigade, buf, &len);
-		apr_brigade_cleanup(brigade);
-		tlen += len;
-		if (tlen == count_bytes || !len) {
-			break;
+	if (r->status == HTTP_REQUEST_ENTITY_TOO_LARGE || r->status == HTTP_INTERNAL_SERVER_ERROR) {
+		/*
+		 * We are acting as a 413 ErrorDocument
+		 * OR there was a bailout and this is shutdown.
+		 * Avoid reading any data from input either way.
+		 */
+		return 0;
+	}
+
+	if (ctx->brigade && ctx->flags & PHP_CTX_BODY_IN_STORE) {
+		/*
+		 * Try to satisfy request from stored buffer
+		 */
+		brigade = ctx->brigade;
+		apr_off_t lenb;
+		apr_status_t rv;
+		apr_bucket *after;
+		apr_bucket *bucket_in;
+		rv = apr_brigade_length(brigade, 1, &lenb);
+		if (rv != APR_SUCCESS) {
+			r->status = HTTP_INTERNAL_SERVER_ERROR;
+			return 0;
 		}
-		buf += len;
-		len = count_bytes - tlen;
+		if (lenb > len_asked) {
+			rv = apr_brigade_partition(brigade, len_asked, &after);
+			if (rv != APR_SUCCESS) {
+				r->status = HTTP_INTERNAL_SERVER_ERROR;
+				return 0;
+			}
+		}
+		bucket_in = APR_BRIGADE_FIRST(brigade);
+		if (APR_BUCKET_IS_EOS(bucket_in)) {
+			// The stored body includes the end of input
+			tlen = 0;
+		} else {
+			apr_bucket_read(bucket_in, &buf, &len_gotten, APR_BLOCK_READ);
+			apr_bucket_delete(bucket_in);
+			if (APR_BRIGADE_EMPTY(brigade)) {
+				apr_brigade_destroy(brigade);
+				ctx->flags &= ~PHP_CTX_BODY_IN_STORE;
+				ctx->brigade = NULL;
+			}
+			tlen = len_gotten;
+			buf += tlen;
+		}
+		buffer_used = 1;
+	}
+	if (!buffer_used || (tlen > 0 && tlen < len_asked)) {
+		/*
+		 * This loop is needed because ap_get_brigade() can return us partial data
+		 * which would cause premature termination of request read. Therefor we
+		 * need to make sure that if data is available we fill the buffer completely.
+		 *
+		 * During read from input filters we can hit a filter that fires an internal redirect.
+		 * For example body size limit.
+		 */
+		brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+		len = len_asked - tlen;
+		while (ap_get_brigade(r->input_filters, brigade, AP_MODE_READBYTES, APR_BLOCK_READ, len) == APR_SUCCESS) {
+			tlen += len;
+			if (len) {
+				apr_brigade_flatten(brigade, buf, &len);
+				apr_brigade_cleanup(brigade);
+			}
+			if (tlen == len_asked || !len) {
+				break;
+			}
+			len = len_asked - tlen;
+			buf += len;
+		}
+		apr_brigade_destroy(brigade);
 	}
 
 	return tlen;
@@ -497,6 +570,12 @@ static int php_apache_request_ctor(request_rec *r, php_struct *ctx TSRMLS_DC)
 
 static void php_apache_request_dtor(request_rec *r TSRMLS_DC)
 {
+	/*
+	 * After dtor the state of CG and possibly others is NOT the same as before ctor.
+	 * This means that the very first request to the PHP engine does NOT encounter the
+	 * same PHP situation as follow-on requests.
+	 * This has been observed to make a difference to the Upload Progress function in ext/session
+	 */
 	php_request_shutdown(NULL);
 }
 
@@ -521,52 +600,68 @@ typedef struct {
 	}
 	if (p) {
 		((php_struct *)SG(server_context))->r = p;
-	} else {
-		SG(server_context) = NULL;
+		((php_struct *)SG(server_context))->nesting_level--;
 	}
 }
 
+/*
+ * This routine is called after the request has been read but before any other
+ * phases have been processed.  This allows us to make decisions based upon
+ * the input header fields.
+ *
+ * This is a RUN_ALL hook.
+ *
+ * This fullfills the function of the registered cleanup handler in previous versions
+ * that became disfunctional with Apache >=2.4
+ */
+static int php_post_read_request(request_rec *r)
+{
+	/*
+	 * Erase a PHP context if a new client request comes in.
+	 */
+	TSRMLS_FETCH();
+	php_struct *ctx;
+	ctx = SG(server_context);
+	if (ctx && !r->prev && !r->main) {
+		SG(server_context) = NULL;
+	}
+	return OK;
+}
+
+
 static int php_handler(request_rec *r)
 {
-	php_struct * volatile ctx;
+	php_struct *ctx;
 	void *conf;
-	apr_bucket_brigade * volatile brigade;
-	apr_bucket *bucket;
-	apr_status_t rv;
-	request_rec * volatile parent_req = NULL;
+	request_rec * parent_req = NULL;
 	TSRMLS_FETCH();
 
 #define PHPAP_INI_OFF php_apache_ini_dtor(r, parent_req TSRMLS_CC);
 
-	conf = ap_get_module_config(r->per_dir_config, &php5_module);
+	ctx = SG(server_context);
+
+	if (ctx == NULL) {
+		ctx = SG(server_context) = apr_pcalloc(r->pool, sizeof(*ctx));
+		/*
+		 * This allocation will happen at first access of the handler in a client request
+		 * It may be a PHP script set for ErrorDocument, and not called explicitly
+		 * by the client request. Or it may not be PHP and get DECLINED later on.
+		 * Setup the context just in case it will be needed.
+		 */
+	}
 
 	/* apply_config() needs r in some cases, so allocate server_context early */
-	ctx = SG(server_context);
-	if (ctx == NULL) {
-		/* The incoming request is a root PHP request.
-		 * It does not have to be the root of the client request.
-		 * The client request may have another handler at root.
-		 * In that case there can be sequential PHP subrequests creating their own root tree.
-		 * This can also be a PHP script called as ErrorDocument by the HTTP core of Apache.
-		 * In that case the original request for some 4xx statuses could be handled first.
-		 * 413 for example will still reach the first handler (us also?).
-		 */
-		ctx = SG(server_context) = apr_pcalloc(r->pool, sizeof(*ctx));
-		/* Note. After handling one PHP request with possible subrequests,
-		 * SG(server_context) MUST be set to NULL and the SAPI deactivated.
-		 * Else they may be visible in a pipelined follow-on request of the client for Apache >=2.4
-		 */
-		ctx->r = r;
-		ctx = NULL; /* May look weird to null it here, but it is to catch the right case in the first_try later on */
-	} else {
+	if (ctx->flags & PHP_CTX_CONSTRUCTED) {
 		/* This is a subrequest of a PHP request tree.
 		 * The direct parent of this subrequest does not have to be a PHP request.
 		 * The pointer called parent is merely the first PHP script walking up the request tree.
 		 */
 		parent_req = ctx->r;
-		brigade = ctx->brigade;
-		ctx->r = r;
+		ctx->nesting_level++;
 	}
+
+	ctx->r = r;
+	conf = ap_get_module_config(r->per_dir_config, &php5_module);
 	apply_config(conf);
 
 	/* At this point there is a context allocated but it is not sure IF we are really going to handle this call with PHP.
@@ -607,6 +702,80 @@ static int php_handler(request_rec *r)
 	}	
 	/* End of section testing for cases we will NOT handle */
 
+
+	/*
+	 * Body limit checks for all methods
+	 * Only for main request, and if not incoming ErrorDocument, and not tested already.
+	 */
+	if (!parent_req && r->status == HTTP_OK && !(ctx->flags & PHP_CTX_BODYLIMIT_TESTED)) {
+		apr_off_t limit;
+		apr_off_t limit_ap;
+		limit_ap = ap_get_limit_req_body(r);
+		if (limit_ap == 0)  {
+			// There is no limit it seems
+			// TODO check for mod_request, kept body for Apache >=2.4
+			limit = 0;
+		} else {
+			limit = limit_ap;
+		}
+		apr_off_t len, tlen;
+		apr_status_t rv;
+		apr_bucket_brigade * brigade;
+		if (limit) {
+			/*
+			 * Make the handler return a 413 BEFORE executing PHP script.
+			 * Read up to the limit bytes to make sure the body is smaller.
+			 * In a chunked body Apache counts part of the chunking overhead for LimitRequestBody.
+			 * The bytes read here will be stored for reading later.
+			 */
+
+			// Create a brigade for the body
+			brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+			ctx->brigade = brigade;
+			for (tlen = 0;tlen < limit;) {
+				rv = ap_get_brigade(r->input_filters, brigade, AP_MODE_READBYTES, APR_BLOCK_READ, (apr_off_t)1024);
+				if (rv != APR_SUCCESS) {
+					break;
+				}
+				rv = apr_brigade_length(brigade, 1, &len);
+				if (rv == APR_SUCCESS) {
+					if (!len) {
+						// EOS seen, the body has been read completely.
+						break;
+					}
+					tlen += len;
+				} else {
+					break;
+				}
+			}
+			if (rv != APR_SUCCESS) {
+				php_apache_sapi_log_message_ex("An error occurred during testing of the request body.", r TSRMLS_CC);
+				r->status = HTTP_INTERNAL_SERVER_ERROR;
+				return DONE;
+			}
+			if (r->status != HTTP_OK) {
+				/*
+				 * We crossed the limit of some input filter
+				 * A 413 will have generated its ErrorDocument
+				 * There is a possibility we triggered a 413
+				 * that PHP wouldn't have triggered in startup.
+				 * But it would have done so in shutdown.
+				 */
+				php_apache_sapi_log_message_ex("An Apache limit was hit during a read of the request body. Shutting down the request before PHP execution.", r TSRMLS_CC);
+				return DONE;
+			}
+			/*
+			 * Reading went well.
+			 * PHP probably won't hit a 413 while reading.
+			 * The body length stays under the Apache limit.
+			 * It is stored for later reading by PHP.
+			 */
+			r->clength = tlen;
+			ctx->flags |= PHP_CTX_BODY_IN_STORE;
+		}
+		ctx->flags |= PHP_CTX_BODYLIMIT_TESTED;
+	}
+
 	/* Setup the CGI variables if this is the main request */
 	if (r->main == NULL ||
 		/* .. or if the sub-request environment differs from the main-request. */
@@ -617,22 +786,64 @@ static int php_handler(request_rec *r)
 		ap_add_cgi_vars(r);
 	}
 
+	// ~~~Start of hardening section
+
+	/*
+	 * Hardening against unresolved reentry cases.
+	 * To execute a PHP subrequest, the SAPI must ALWAYS be fully activated.
+	 */
+	if (ctx->flags & PHP_CTX_CONSTRUCTED) {
+		if (!SG(sapi_started) || !EG(active)) {
+			php_apache_sapi_log_message_ex("A PHP subrequest came in during PHP startup or shutdown. It can not be handled in this state.", r TSRMLS_CC);
+			r->status = HTTP_INTERNAL_SERVER_ERROR;
+			return DONE;
+		}
+		if (r->status == HTTP_REQUEST_ENTITY_TOO_LARGE) {
+			/*
+			 * We hit an input filter limit with a PHP context already constructed.
+			 *
+			 * While reading a request body, Apache can fire filter actions.
+			 * One of those actions is checking for a body limit and calling ErrorDocument
+			 * An ErrorDocument can be set to a PHP script, thus arriving in this clause.
+			 *
+			 * In this state unfortunately we cannot safely execute PHP.
+			 * Let Apache return a status 413.
+			 */
+			php_apache_sapi_log_message_ex("An Apache input limit was hit during a PHP read and a PHP ErrorDocument was also set, which will not be allowed to run as a subdocument.", r TSRMLS_CC);
+			return DONE;
+		}
+		// Continue with subrequest in running PHP context.
+	}
+
+	// ~~~End of hardening section
+
+	/* NOTE
+	 * The bailout strategy of zend_try for runtime errors is not foolproof in this handler.
+	 * IF input is read from input filters during execution of a subrequest AND a bailout occurs,
+	 * ths state of the input becomes undefined and Apache reads of input may loop infinitely,
+	 * at least with chunked body inputs where the length is not fixed beforehand.
+	 * We will try to avoid reading input and drop the connection as soon as possible.
+	 */
+
 	if (!parent_req) {
-		// Make this the first try
+		// Make this the first try, so we can bubble up later.
 		EG(bailout) = NULL;
 	}
 
 zend_try {
 
-	if (ctx == NULL) { 
-		/* We came in WITHOUT a context. The SAPI must be activated to handle PHP */
-		brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
-		ctx = SG(server_context);
-		ctx->brigade = brigade;
-
+	if ((ctx->flags & PHP_CTX_CONSTRUCTED) == 0) {
+		// Coming in WITHOUT an active context. The SAPI must be activated to handle PHP.
+		apr_status_t status_before = r->status;
 		if (php_apache_request_ctor(r, ctx TSRMLS_CC)!=SUCCESS) {
 			zend_bailout();
 			/* lands after next zend_end_try */
+		}
+		ctx->flags |= PHP_CTX_CONSTRUCTED;
+		// A subrequest during construction may have set an Error.
+		if (r->status != status_before && r->status != HTTP_OK) {
+			php_apache_sapi_log_message_ex("An Apache filter threw an error during PHP setup. LimitRequestBody or KeptBodySize exceeded?", r TSRMLS_CC);
+			zend_bailout();
 		}
 	}
 
@@ -654,11 +865,13 @@ zend_try {
 		zfd.free_filename = 0;
 		zfd.opened_path = NULL;
 
+		ctx->flags |= PHP_CTX_SCRIPT_RUNNING;
 		if (!parent_req) {
 			php_execute_script(&zfd TSRMLS_CC);
 		} else {
 			zend_execute_scripts(ZEND_INCLUDE TSRMLS_CC, NULL, 1, &zfd);
 		}
+		ctx->flags &= ~PHP_CTX_SCRIPT_RUNNING;
 
 		apr_table_set(r->notes, "mod_php_memory_usage",
 			apr_psprintf(ctx->r->pool, "%" APR_SIZE_T_FMT, zend_memory_peak_usage(1 TSRMLS_CC)));
@@ -668,41 +881,50 @@ zend_try {
 	/* zend_bailout will land here */
 	if (CG(unclean_shutdown)) {
 		/*
-		 * There was a bailout along the way.
 		 * Only handle the exit in the main PHP script.
-		 * Otherwise we may hit PHP script along the way with a shutdown PHP engine.
+		 * Otherwise PHP script may be hit along the way
+		 * with a PHP engine that is partly shutdown.
 		 */
 		if (EG(bailout)) {
-			// Jump up the stack one level
+			// TRQ Jump up the stack one level
+			ctx->nesting_level--;
 			LONGJMP(*EG(bailout), FAILURE);
 		}
-		// Back at the main script, proceed to exit.
+		/*
+		 * Now back at the main script, proceed to exit.
+		 * Input filters may be unreliable, drop connection.
+		 */
+		php_apache_sapi_log_message_ex("PHP script aborted with bailout.", r TSRMLS_CC);
 		r->status = HTTP_INTERNAL_SERVER_ERROR;
 		r->connection->keepalive = AP_CONN_CLOSE;
 	}
 
 	if (!parent_req) {
-		/* A PHP tree of requests with possible subrequests has been completely handled.
+		/*
+		 * A PHP tree of requests with possible subrequests has been completely handled.
 		 * More PHP requests may come from this client request if the root handler is not PHP.
 		 * The SAPI will have to be activated again for them.
 		 */
 		php_apache_request_dtor(r TSRMLS_CC);
-		SG(server_context) = NULL;
-		bucket = apr_bucket_eos_create(r->connection->bucket_alloc);
-		APR_BRIGADE_INSERT_TAIL(brigade, bucket);
-
-		rv = ap_pass_brigade(r->output_filters, brigade);
-		if (rv != APR_SUCCESS || r->connection->aborted) {
-zend_first_try {
-			php_handle_aborted_connection();
-} zend_end_try();
-		}
-		apr_brigade_cleanup(brigade);
+		ctx->flags &= ~PHP_CTX_CONSTRUCTED;
 	} else {
 		ctx->r = parent_req;
+		ctx->nesting_level--;
 	}
 
-	return OK;
+	apr_bucket_brigade *brigade;
+	apr_bucket *bucket;
+	apr_status_t rv;
+        brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+	bucket = apr_bucket_eos_create(r->connection->bucket_alloc);
+	APR_BRIGADE_INSERT_TAIL(brigade, bucket);
+	rv = ap_pass_brigade(r->output_filters, brigade);
+	if (rv == APR_SUCCESS || r->status != HTTP_OK || r->connection->aborted) {
+	    return OK;
+	} else {
+		php_apache_sapi_log_message_ex("An error occurred in Apache on closing of PHP script output.", r TSRMLS_CC);
+		return HTTP_INTERNAL_SERVER_ERROR;
+	}
 }
 
 static void php_apache_child_init(apr_pool_t *pchild, server_rec *s)
@@ -716,6 +938,7 @@ void php_ap2_register_hook(apr_pool_t *p)
 	ap_hook_post_config(php_apache_server_startup, NULL, NULL, APR_HOOK_MIDDLE);
 	ap_hook_handler(php_handler, NULL, NULL, APR_HOOK_MIDDLE);
 	ap_hook_child_init(php_apache_child_init, NULL, NULL, APR_HOOK_MIDDLE);
+	ap_hook_post_read_request(php_post_read_request, NULL, NULL, APR_HOOK_LAST);
 }
 
 /*

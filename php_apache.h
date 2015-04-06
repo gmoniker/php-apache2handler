@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | PHP Version 5                                                        |
    +----------------------------------------------------------------------+
-   | Copyright (c) 1997-2015 The PHP Group                                |
+   | Copyright (c) 1997-2014 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -31,6 +31,11 @@ extern module AP_MODULE_DECLARE_DATA php5_module;
 /* A way to specify the location of the php.ini dir in an apache directive */
 extern char *apache2_php_ini_path_override;
 
+#define PHP_CTX_CONSTRUCTED 1
+#define PHP_CTX_SCRIPT_RUNNING 2
+#define PHP_CTX_BODYLIMIT_TESTED 4
+#define PHP_CTX_BODY_IN_STORE 8
+
 /* The server_context used by PHP */
 typedef struct php_struct {
 	int state;
@@ -46,7 +51,10 @@ typedef struct php_struct {
 	int request_processed;
 	/* final content type */
 	char *content_type;
+	int nesting_level;
+	int flags;
 } php_struct;
+
 
 void *merge_php_config(apr_pool_t *p, void *base_conf, void *new_conf);
 void *create_php_config(apr_pool_t *p, char *dummy);
