@@ -13,6 +13,7 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
    | Authors: Sascha Schumann <sascha@schumann.cx>                        |
+   |          Gerrit Venema <php@golgol.nl>
    |          Parts based on Apache 1.3 SAPI module by                    |
    |          Rasmus Lerdorf and Zeev Suraski                             |
    +----------------------------------------------------------------------+
@@ -191,12 +192,10 @@ php_apache_sapi_read_post(char *buf, uint count_bytes TSRMLS_DC)
 	 * But ALSO on any reading of php://stdin during script execution.
 	 */
 
-	apr_size_t len_asked, len_gotten;
-	int tlen, buffer_used;
-	apr_off_t len;
+	int tlen;
 	php_struct *ctx = SG(server_context);
 	request_rec *r;
-	apr_bucket_brigade *brigade;
+	apr_size_t len_asked;
 
 	r = ctx->r;
 	tlen = (int)count_bytes;
@@ -218,70 +217,94 @@ php_apache_sapi_read_post(char *buf, uint count_bytes TSRMLS_DC)
 		return 0;
 	}
 
-	if (ctx->brigade && ctx->flags & PHP_CTX_BODY_IN_STORE) {
+	if (ctx->brigade && (ctx->flags & PHP_CTX_BODY_IN_STORE)) {
 		/*
-		 * Try to satisfy request from stored buffer
+		 * Satisfy request from stored buffer
 		 */
-		brigade = ctx->brigade;
+		apr_bucket_brigade *bb;
+		apr_bucket_brigade *brigade;
 		apr_off_t lenb;
 		apr_status_t rv;
+		apr_size_t len_gotten;
 		apr_bucket *after;
 		apr_bucket *bucket_in;
+		if (ctx->flags & PHP_CTX_BODY_EOS) {
+			// The body has been exhausted already
+			return 0;
+		}
+		brigade = ctx->brigade;
 		rv = apr_brigade_length(brigade, 1, &lenb);
 		if (rv != APR_SUCCESS) {
 			r->status = HTTP_INTERNAL_SERVER_ERROR;
 			return 0;
 		}
 		if (lenb > len_asked) {
+			len_gotten = len_asked;
 			rv = apr_brigade_partition(brigade, len_asked, &after);
 			if (rv != APR_SUCCESS) {
 				r->status = HTTP_INTERNAL_SERVER_ERROR;
 				return 0;
 			}
-		}
-		bucket_in = APR_BRIGADE_FIRST(brigade);
-		if (APR_BUCKET_IS_EOS(bucket_in)) {
-			// The stored body includes the end of input
-			tlen = 0;
 		} else {
-			apr_bucket_read(bucket_in, &buf, &len_gotten, APR_BLOCK_READ);
-			apr_bucket_delete(bucket_in);
-			if (APR_BRIGADE_EMPTY(brigade)) {
-				apr_brigade_destroy(brigade);
-				ctx->flags &= ~PHP_CTX_BODY_IN_STORE;
-				ctx->brigade = NULL;
-			}
-			tlen = len_gotten;
-			buf += tlen;
+			len_gotten = lenb;
+			after = APR_BRIGADE_LAST(brigade);
+			ctx->flags |= PHP_CTX_BODY_EOS;
 		}
-		buffer_used = 1;
-	}
-	if (!buffer_used || (tlen > 0 && tlen < len_asked)) {
+		bb = apr_brigade_split(brigade, after);
+		ctx->brigade = bb;
+		apr_brigade_flatten(brigade, buf, &len_gotten);
+		apr_brigade_destroy(brigade);
+		tlen = len_gotten;
+	} else {
 		/*
-		 * This loop is needed because ap_get_brigade() can return us partial data
-		 * which would cause premature termination of request read. Therefor we
-		 * need to make sure that if data is available we fill the buffer completely.
-		 *
+		 * There is no stored body data available. Read data from the input filter stack.
 		 * During read from input filters we can hit a filter that fires an internal redirect.
 		 * For example body size limit.
 		 */
+		int eos_reached = 0;
+		apr_off_t len;
+		apr_size_t len_gotten;
+		apr_status_t rv;
+		apr_bucket_brigade *brigade;
+		apr_bucket *bucket_in, *bucket_sentinel;
 		brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
-		len = len_asked - tlen;
-		while (ap_get_brigade(r->input_filters, brigade, AP_MODE_READBYTES, APR_BLOCK_READ, len) == APR_SUCCESS) {
-			tlen += len;
-			if (len) {
-				apr_brigade_flatten(brigade, buf, &len);
-				apr_brigade_cleanup(brigade);
+		len = len_asked;
+		if (ctx->flags & PHP_CTX_BODY_EOS) {
+			// The body has been exhausted already
+			return 0;
+		}
+		while (1) {
+			rv = ap_get_brigade(r->input_filters, brigade, AP_MODE_READBYTES, APR_BLOCK_READ, len);
+			if (rv != APR_SUCCESS && rv != APR_EAGAIN && rv != APR_EOF) {
+				break;
 			}
-			if (tlen == len_asked || !len) {
+			bucket_sentinel = APR_BRIGADE_SENTINEL(brigade);
+			for (bucket_in = APR_BRIGADE_FIRST(brigade);
+				bucket_in != bucket_sentinel;
+				bucket_in = APR_BUCKET_NEXT(bucket_in))
+			{
+				if (APR_BUCKET_IS_EOS(bucket_in)) {
+					eos_reached = 1;
+					break;
+				}
+			}
+			tlen += len;
+			len_gotten = (apr_size_t) len;
+			if (len_gotten) {
+				apr_brigade_flatten(brigade, buf, &len_gotten);
+				buf += len_gotten;
+			}
+			apr_brigade_cleanup(brigade);
+			if (tlen == len_asked || eos_reached) {
 				break;
 			}
 			len = len_asked - tlen;
-			buf += len;
 		}
 		apr_brigade_destroy(brigade);
+		if (eos_reached) {
+			ctx->flags |= PHP_CTX_BODY_EOS;
+		}
 	}
-
 	return tlen;
 }
 
@@ -617,12 +640,15 @@ typedef struct {
 static int php_post_read_request(request_rec *r)
 {
 	/*
-	 * Erase a PHP context if a new client request comes in.
+	 * Erase a PHP context when a new client request comes in.
+	 * Redirections and ErrorDocuments will have a r->prev
+	 * With authentication negotations this can be hit multiple times,
+	 * before the PHP handler will be called.
 	 */
 	TSRMLS_FETCH();
 	php_struct *ctx;
 	ctx = SG(server_context);
-	if (ctx && !r->prev && !r->main) {
+	if (ctx && !r->prev) {
 		SG(server_context) = NULL;
 	}
 	return OK;
@@ -634,6 +660,10 @@ static int php_handler(request_rec *r)
 	php_struct *ctx;
 	void *conf;
 	request_rec * parent_req = NULL;
+	if (r->finfo.filetype == APR_NOFILE) {
+		// Save time on redirect handler requests
+		return DECLINED;
+	}
 	TSRMLS_FETCH();
 
 #define PHPAP_INI_OFF php_apache_ini_dtor(r, parent_req TSRMLS_CC);
@@ -712,15 +742,17 @@ static int php_handler(request_rec *r)
 		apr_off_t limit_ap;
 		limit_ap = ap_get_limit_req_body(r);
 		if (limit_ap == 0)  {
-			// There is no limit it seems
-			// TODO check for mod_request, kept body for Apache >=2.4
+			/*
+			 * There is no limit it seems...
+			 * Possible gotcha's:
+			 * mod_request, kept body for Apache >=2.4 can put in a limit
+			 * In chunked transfer, each chunk header/footer must stay below a request_line_limit
+			 * custom filters...
+			 */
 			limit = 0;
 		} else {
 			limit = limit_ap;
 		}
-		apr_off_t len, tlen;
-		apr_status_t rv;
-		apr_bucket_brigade * brigade;
 		if (limit) {
 			/*
 			 * Make the handler return a 413 BEFORE executing PHP script.
@@ -728,29 +760,77 @@ static int php_handler(request_rec *r)
 			 * In a chunked body Apache counts part of the chunking overhead for LimitRequestBody.
 			 * The bytes read here will be stored for reading later.
 			 */
+			int eos_reached = 0;
+			apr_off_t len, len_read;
+			apr_status_t rv_get, rv_copy, rv_length;
+			apr_bucket_brigade *brigade;
+			apr_bucket_brigade *brigade_kept_body;
+			apr_bucket *bucket_in, *bucket_keep, *bucket_sentinel;
 
 			// Create a brigade for the body
-			brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
-			ctx->brigade = brigade;
-			for (tlen = 0;tlen < limit;) {
-				rv = ap_get_brigade(r->input_filters, brigade, AP_MODE_READBYTES, APR_BLOCK_READ, (apr_off_t)1024);
-				if (rv != APR_SUCCESS) {
+			brigade_kept_body = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+			// Try for one more than the limit
+			limit++;
+			for (len = 0;len < limit;) {
+				len_read = limit - len;
+				brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+				rv_get = ap_get_brigade(r->input_filters, brigade, AP_MODE_READBYTES, APR_BLOCK_READ, len_read);
+				/*
+				 * EAGAIN can happen with overly long chunk extensions or bogus data after the chunk.
+				 * Should not happen with Content-Length bodies.
+				 * APR_EOF means a content body was cut short but last data may have been returned.
+				 */ 
+				if (rv_get == APR_EOF || rv_get == APR_EAGAIN) {
+					// Normalize
+					rv_get = APR_SUCCESS;
+				}
+				if (rv_get != APR_SUCCESS) {
+					// Bail
 					break;
 				}
-				rv = apr_brigade_length(brigade, 1, &len);
-				if (rv == APR_SUCCESS) {
-					if (!len) {
-						// EOS seen, the body has been read completely.
+				rv_length = apr_brigade_length(brigade, 1, &len_read);
+				if (rv_length != APR_SUCCESS) {
+					// Bail
+					break;
+				}
+				len += len_read;
+				// Copy the buckets
+				// TODO filter out unwanted metadata buckets
+				bucket_sentinel = APR_BRIGADE_SENTINEL(brigade);
+				for (bucket_in = APR_BRIGADE_FIRST(brigade);
+					bucket_in != bucket_sentinel;
+					bucket_in = APR_BUCKET_NEXT(bucket_in))
+				{
+					rv_copy = apr_bucket_copy(bucket_in, &bucket_keep);
+					if (rv_copy == APR_SUCCESS) {
+						APR_BRIGADE_INSERT_TAIL(brigade_kept_body, bucket_keep);
+						if (APR_BUCKET_IS_EOS(bucket_in)) {
+							eos_reached = 1;
+							break;
+						}
+					} else {
 						break;
 					}
-					tlen += len;
-				} else {
+				}
+				// Reset the brigade for ap_get_brigade
+				apr_brigade_cleanup(brigade);
+				if (eos_reached) {
+					break;
+				}
+				if (rv_copy != APR_SUCCESS) {
 					break;
 				}
 			}
-			if (rv != APR_SUCCESS) {
-				php_apache_sapi_log_message_ex("An error occurred during testing of the request body.", r TSRMLS_CC);
-				r->status = HTTP_INTERNAL_SERVER_ERROR;
+			apr_brigade_destroy(brigade);
+			if (rv_get != APR_SUCCESS || rv_length != APR_SUCCESS || rv_copy != APR_SUCCESS)
+			{
+				php_apache_sapi_log_message_ex("An error occurred while reading the request body.", r TSRMLS_CC);
+				if (r->status != HTTP_OK) {
+				} else if (rv_get != APR_SUCCESS) {
+					r->status = HTTP_BAD_REQUEST;
+				} else {
+					r->status = HTTP_INTERNAL_SERVER_ERROR;
+				}
 				return DONE;
 			}
 			if (r->status != HTTP_OK) {
@@ -765,12 +845,22 @@ static int php_handler(request_rec *r)
 				return DONE;
 			}
 			/*
-			 * Reading went well.
+			 * Reading up to the limit went well.
 			 * PHP probably won't hit a 413 while reading.
 			 * The body length stays under the Apache limit.
+			 * AND no chunks exceeded the limit request line.
 			 * It is stored for later reading by PHP.
 			 */
-			r->clength = tlen;
+			apr_bucket *bucket;
+			if (!eos_reached) {
+				// Make sure there is an EOS bucket at the end
+				bucket = APR_BRIGADE_LAST(brigade_kept_body);
+				if (!APR_BUCKET_IS_EOS(bucket)) {
+					bucket = apr_bucket_eos_create(r->connection->bucket_alloc);
+					APR_BRIGADE_INSERT_TAIL(brigade_kept_body, bucket);
+				}
+			}
+			ctx->brigade = brigade_kept_body;
 			ctx->flags |= PHP_CTX_BODY_IN_STORE;
 		}
 		ctx->flags |= PHP_CTX_BODYLIMIT_TESTED;

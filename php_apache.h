@@ -35,6 +35,7 @@ extern char *apache2_php_ini_path_override;
 #define PHP_CTX_SCRIPT_RUNNING 2
 #define PHP_CTX_BODYLIMIT_TESTED 4
 #define PHP_CTX_BODY_IN_STORE 8
+#define PHP_CTX_BODY_EOS 16
 
 /* The server_context used by PHP */
 typedef struct php_struct {
