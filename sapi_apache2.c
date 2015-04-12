@@ -982,10 +982,10 @@ zend_try {
 		}
 		/*
 		 * Now back at the main script, proceed to exit.
-		 * Input filters may be unreliable, drop connection.
+		 * Unclean shutdown also happens with the "die" instruction.
+		 * Avoid reading from input filters after lngjmps so drop connection.
 		 */
-		php_apache_sapi_log_message_ex("PHP script aborted with bailout.", r TSRMLS_CC);
-		r->status = HTTP_INTERNAL_SERVER_ERROR;
+		ctx->flags &= ~PHP_CTX_SCRIPT_RUNNING;
 		r->connection->keepalive = AP_CONN_CLOSE;
 	}
 
