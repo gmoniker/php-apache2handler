@@ -695,7 +695,6 @@ zend_try {
 		 * Unclean shutdown also happens with the "die" instruction.
 		 * Avoid reading from input filters after lngjmps so drop connection.
 		 */
-		ctx->flags &= ~PHP_CTX_SCRIPT_RUNNING;
 		r->connection->keepalive = AP_CONN_CLOSE;
 	}
 
