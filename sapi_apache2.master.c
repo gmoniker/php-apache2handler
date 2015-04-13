@@ -277,11 +277,7 @@ php_apache_sapi_read_post(char *buf, uint count_bytes TSRMLS_DC)
 			rv = ap_get_brigade(r->input_filters, brigade, AP_MODE_READBYTES, APR_BLOCK_READ, len);
 			if (rv != APR_SUCCESS && rv != APR_EAGAIN && rv != APR_EOF) {
 				break;
-			} else {
-				// Normalize the return value
-				rv = APR_SUCCESS;
 			}
-			// See if there is an end of stream in here
 			bucket_sentinel = APR_BRIGADE_SENTINEL(brigade);
 			for (bucket_in = APR_BRIGADE_FIRST(brigade);
 				bucket_in != bucket_sentinel;
@@ -292,33 +288,19 @@ php_apache_sapi_read_post(char *buf, uint count_bytes TSRMLS_DC)
 					break;
 				}
 			}
-			// What length of data did we get?
-			rv = apr_brigade_length(brigade, 1, &len);
-			if (rv != APR_SUCCESS) {
-				break;
-			}
-			tlen += (int) len;
+			tlen += len;
 			len_gotten = (apr_size_t) len;
 			if (len_gotten) {
-				// Put the data in the buffer
 				apr_brigade_flatten(brigade, buf, &len_gotten);
 				buf += len_gotten;
 			}
-			// See if we got the lot or are at the end of stream.
+			apr_brigade_cleanup(brigade);
 			if (tlen == len_asked || eos_reached) {
 				break;
 			}
 			len = len_asked - tlen;
-			apr_brigade_cleanup(brigade);
 		}
 		apr_brigade_destroy(brigade);
-		if (rv != APR_SUCCESS) {
-			r->status = HTTP_INTERNAL_SERVER_ERROR;
-			if (EG(bailout)) {
-				zend_bailout();
-			}
-			return 0;
-		}
 		if (eos_reached) {
 			ctx->flags |= PHP_CTX_BODY_EOS;
 		}
