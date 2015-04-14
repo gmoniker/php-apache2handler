@@ -645,34 +645,6 @@ typedef struct {
 	}
 }
 
-/*
- * This routine is called after the request has been read but before any other
- * phases have been processed.  This allows us to make decisions based upon
- * the input header fields.
- *
- * This is a RUN_ALL hook.
- *
- * This fullfills the function of the registered cleanup handler in previous versions
- * that became disfunctional with Apache >=2.4
- */
-static int php_post_read_request(request_rec *r)
-{
-	/*
-	 * Erase a PHP context when a new client request comes in.
-	 * Redirections and ErrorDocuments will have a r->prev
-	 * With authentication negotations this can be hit multiple times,
-	 * before the PHP handler will be called.
-	 */
-	TSRMLS_FETCH();
-	php_struct *ctx;
-	ctx = SG(server_context);
-	if (ctx && !r->prev) {
-		SG(server_context) = NULL;
-	}
-	return OK;
-}
-
-
 static int php_handler(request_rec *r)
 {
 	php_struct *ctx;
@@ -1014,7 +986,8 @@ zend_try {
 		 * The SAPI will have to be activated again for them.
 		 */
 		php_apache_request_dtor(r TSRMLS_CC);
-		ctx->flags &= ~PHP_CTX_CONSTRUCTED;
+		SG(server_context) = NULL;
+		ctx = NULL;
 	} else {
 		ctx->r = parent_req;
 		ctx->nesting_level--;
@@ -1046,7 +1019,6 @@ void php_ap2_register_hook(apr_pool_t *p)
 	ap_hook_post_config(php_apache_server_startup, NULL, NULL, APR_HOOK_MIDDLE);
 	ap_hook_handler(php_handler, NULL, NULL, APR_HOOK_MIDDLE);
 	ap_hook_child_init(php_apache_child_init, NULL, NULL, APR_HOOK_MIDDLE);
-	ap_hook_post_read_request(php_post_read_request, NULL, NULL, APR_HOOK_LAST);
 }
 
 /*
