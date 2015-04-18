@@ -217,7 +217,7 @@ php_apache_sapi_read_post(char *buf, uint count_bytes TSRMLS_DC)
 		return 0;
 	}
 
-	if (ctx->brigade && (ctx->flags & PHP_CTX_BODY_IN_STORE)) {
+	if (ctx->kept_body && (ctx->flags & PHP_CTX_BODY_IN_STORE)) {
 		/*
 		 * Satisfy request from stored buffer
 		 */
@@ -232,7 +232,7 @@ php_apache_sapi_read_post(char *buf, uint count_bytes TSRMLS_DC)
 			// The body has been exhausted already
 			return 0;
 		}
-		brigade = ctx->brigade;
+		brigade = ctx->kept_body;
 		rv = apr_brigade_length(brigade, 1, &lenb);
 		if (rv != APR_SUCCESS) {
 			r->status = HTTP_INTERNAL_SERVER_ERROR;
@@ -251,7 +251,7 @@ php_apache_sapi_read_post(char *buf, uint count_bytes TSRMLS_DC)
 			ctx->flags |= PHP_CTX_BODY_EOS;
 		}
 		bb = apr_brigade_split(brigade, after);
-		ctx->brigade = bb;
+		ctx->kept_body = bb;
 		apr_brigade_flatten(brigade, buf, &len_gotten);
 		apr_brigade_destroy(brigade);
 		tlen = len_gotten;
@@ -267,7 +267,7 @@ php_apache_sapi_read_post(char *buf, uint count_bytes TSRMLS_DC)
 		apr_status_t rv;
 		apr_bucket_brigade *brigade;
 		apr_bucket *bucket_in, *bucket_sentinel;
-		brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+		brigade = ctx->brigade;
 		len = len_asked;
 		if (ctx->flags & PHP_CTX_BODY_EOS) {
 			// The body has been exhausted already
@@ -311,7 +311,7 @@ php_apache_sapi_read_post(char *buf, uint count_bytes TSRMLS_DC)
 			len = len_asked - tlen;
 			apr_brigade_cleanup(brigade);
 		}
-		apr_brigade_destroy(brigade);
+		apr_brigade_cleanup(brigade);
 		if (rv != APR_SUCCESS) {
 			r->status = HTTP_INTERNAL_SERVER_ERROR;
 			if (EG(bailout)) {
@@ -852,7 +852,7 @@ static int php_handler(request_rec *r)
 					APR_BRIGADE_INSERT_TAIL(brigade_kept_body, bucket);
 				}
 			}
-			ctx->brigade = brigade_kept_body;
+			ctx->kept_body = brigade_kept_body;
 			ctx->flags |= PHP_CTX_BODY_IN_STORE;
 		}
 		ctx->flags |= PHP_CTX_BODYLIMIT_TESTED;
@@ -915,6 +915,7 @@ static int php_handler(request_rec *r)
 zend_try {
 
 	if ((ctx->flags & PHP_CTX_CONSTRUCTED) == 0) {
+		ctx->brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
 		// Coming in WITHOUT an active context. The SAPI must be activated to handle PHP.
 		apr_status_t status_before = r->status;
 		if (php_apache_request_ctor(r, ctx TSRMLS_CC)!=SUCCESS) {
@@ -989,19 +990,27 @@ zend_try {
 		 */
 		php_apache_request_dtor(r TSRMLS_CC);
 		SG(server_context) = NULL;
+		if (ctx->kept_body) {
+			apr_brigade_cleanup(ctx->kept_body);
+		}
+		if (ctx->brigade) {
+			apr_brigade_cleanup(ctx->brigade);
+		}
 		ctx = NULL;
 	} else {
 		ctx->r = parent_req;
 		ctx->nesting_level--;
+		return OK;
 	}
 
 	apr_bucket_brigade *brigade;
 	apr_bucket *bucket;
 	apr_status_t rv;
-        brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+	brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
 	bucket = apr_bucket_eos_create(r->connection->bucket_alloc);
 	APR_BRIGADE_INSERT_TAIL(brigade, bucket);
 	rv = ap_pass_brigade(r->output_filters, brigade);
+	apr_brigade_cleanup(brigade);
 	if (rv == APR_SUCCESS || r->status != HTTP_OK || r->connection->aborted) {
 	    return OK;
 	} else {

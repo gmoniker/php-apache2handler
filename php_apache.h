@@ -42,6 +42,7 @@ typedef struct php_struct {
 	int state;
 	request_rec *r;
 	apr_bucket_brigade *brigade;
+	apr_bucket_brigade *kept_body;
 	/* stat structure of the current file */
 #if defined(NETWARE) && defined(CLIB_STAT_PATCH)
 	struct stat_libc finfo;
