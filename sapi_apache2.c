@@ -642,6 +642,8 @@ typedef struct {
 	if (p) {
 		((php_struct *)SG(server_context))->r = p;
 		((php_struct *)SG(server_context))->nesting_level--;
+	} else {
+		SG(server_context) = NULL;
 	}
 }
 
