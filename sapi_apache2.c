@@ -997,25 +997,24 @@ zend_try {
 			apr_brigade_cleanup(ctx->brigade);
 		}
 		ctx = NULL;
+		apr_bucket_brigade *brigade;
+		apr_bucket *bucket;
+		apr_status_t rv;
+		brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+		bucket = apr_bucket_eos_create(r->connection->bucket_alloc);
+		APR_BRIGADE_INSERT_TAIL(brigade, bucket);
+		rv = ap_pass_brigade(r->output_filters, brigade);
+		apr_brigade_cleanup(brigade);
+		if (rv == APR_SUCCESS || r->status != HTTP_OK || r->connection->aborted) {
+			return OK;
+		} else {
+			php_apache_sapi_log_message_ex("An error occurred in Apache on closing of PHP script output.", r TSRMLS_CC);
+			return HTTP_INTERNAL_SERVER_ERROR;
+		}
 	} else {
 		ctx->r = parent_req;
 		ctx->nesting_level--;
 		return OK;
-	}
-
-	apr_bucket_brigade *brigade;
-	apr_bucket *bucket;
-	apr_status_t rv;
-	brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
-	bucket = apr_bucket_eos_create(r->connection->bucket_alloc);
-	APR_BRIGADE_INSERT_TAIL(brigade, bucket);
-	rv = ap_pass_brigade(r->output_filters, brigade);
-	apr_brigade_cleanup(brigade);
-	if (rv == APR_SUCCESS || r->status != HTTP_OK || r->connection->aborted) {
-	    return OK;
-	} else {
-		php_apache_sapi_log_message_ex("An error occurred in Apache on closing of PHP script output.", r TSRMLS_CC);
-		return HTTP_INTERNAL_SERVER_ERROR;
 	}
 }
 
