@@ -761,11 +761,11 @@ static int php_handler(request_rec *r)
 
 			// Create a brigade for the body
 			brigade_kept_body = apr_brigade_create(r->pool, r->connection->bucket_alloc);
+			brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
 			// Try for one more than the limit
 			limit++;
 			for (len = 0;len < limit;) {
 				len_read = limit - len;
-				brigade = apr_brigade_create(r->pool, r->connection->bucket_alloc);
 				rv_get = ap_get_brigade(r->input_filters, brigade, AP_MODE_READBYTES, APR_BLOCK_READ, len_read);
 				/*
 				 * EAGAIN can happen with overly long chunk extensions or bogus data after the chunk.
@@ -793,9 +793,9 @@ static int php_handler(request_rec *r)
 					bucket_in != bucket_sentinel;
 					bucket_in = APR_BUCKET_NEXT(bucket_in))
 				{
-					apr_bucket_setaside(bucket_in, r->pool);
 					rv_copy = apr_bucket_copy(bucket_in, &bucket_keep);
 					if (rv_copy == APR_SUCCESS) {
+						apr_bucket_setaside(bucket_keep, r->pool);
 						APR_BRIGADE_INSERT_TAIL(brigade_kept_body, bucket_keep);
 						if (APR_BUCKET_IS_EOS(bucket_in)) {
 							eos_reached = 1;
@@ -992,10 +992,10 @@ zend_try {
 		php_apache_request_dtor(r TSRMLS_CC);
 		SG(server_context) = NULL;
 		if (ctx->kept_body) {
-			apr_brigade_cleanup(ctx->kept_body);
+			apr_brigade_destroy(ctx->kept_body);
 		}
 		if (ctx->brigade) {
-			apr_brigade_cleanup(ctx->brigade);
+			apr_brigade_destroy(ctx->brigade);
 		}
 		ctx = NULL;
 		apr_bucket_brigade *brigade;
