@@ -793,6 +793,7 @@ static int php_handler(request_rec *r)
 					bucket_in != bucket_sentinel;
 					bucket_in = APR_BUCKET_NEXT(bucket_in))
 				{
+					apr_bucket_setaside(bucket_in, r->pool);
 					rv_copy = apr_bucket_copy(bucket_in, &bucket_keep);
 					if (rv_copy == APR_SUCCESS) {
 						APR_BRIGADE_INSERT_TAIL(brigade_kept_body, bucket_keep);
